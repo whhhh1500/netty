@@ -273,7 +273,7 @@ public abstract class SSLEngineTest {
     }
 
     private final BufferType type;
-    private final ProtocolCipherCombo protocolCipherCombo;
+    protected final ProtocolCipherCombo protocolCipherCombo;
     private final boolean delegate;
     private ExecutorService delegatingExecutor;
 
@@ -2288,15 +2288,13 @@ public abstract class SSLEngineTest {
             encryptedClientToServer.flip();
 
             assertEquals(SSLEngineResult.Status.CLOSED, result.getStatus());
+            SSLEngineResult.HandshakeStatus hs = result.getHandshakeStatus();
             // Need an UNWRAP to read the response of the close_notify
-            if ((PlatformDependent.javaVersion() >= 12 && sslClientProvider() == SslProvider.JDK)
-                    || Conscrypt.isEngineSupported(client)) {
-                // This is a workaround for a possible JDK12+ bug.
-                //
-                // See http://mail.openjdk.java.net/pipermail/security-dev/2019-February/019406.html.
-                assertEquals(SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING, result.getHandshakeStatus());
+            if (sslClientProvider() == SslProvider.JDK || Conscrypt.isEngineSupported(client)) {
+                assertTrue(hs == SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING
+                        || hs == SSLEngineResult.HandshakeStatus.NEED_UNWRAP);
             } else {
-                assertEquals(SSLEngineResult.HandshakeStatus.NEED_UNWRAP, result.getHandshakeStatus());
+                assertEquals(SSLEngineResult.HandshakeStatus.NEED_UNWRAP, hs);
             }
 
             int produced = result.bytesProduced();
@@ -3477,7 +3475,9 @@ public abstract class SSLEngineTest {
 
     @Test
     public void testMasterKeyLogging() throws Exception {
-
+        if (protocolCipherCombo != ProtocolCipherCombo.tlsv12()) {
+            return;
+        }
         /*
          * At the moment master key logging is not supported for conscrypt
          */
@@ -3496,6 +3496,8 @@ public abstract class SSLEngineTest {
         serverSslCtx = wrapContext(SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                 .sslProvider(sslServerProvider())
                 .sslContextProvider(serverSslContextProvider())
+                .protocols(protocols())
+                .ciphers(ciphers())
                 .build());
         Socket socket = null;
 
@@ -3630,6 +3632,51 @@ public abstract class SSLEngineTest {
         public java.security.cert.X509Certificate[] getAcceptedIssuers() {
             return EmptyArrays.EMPTY_X509_CERTIFICATES;
         }
+    }
+
+    @Test
+    public void testDefaultProtocolsIncludeTLSv13() throws Exception {
+        // Don't specify the protocols as we want to test the default selection
+        clientSslCtx = wrapContext(SslContextBuilder.forClient()
+                .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                .sslProvider(sslClientProvider())
+                .sslContextProvider(clientSslContextProvider())
+                .ciphers(ciphers())
+                .build());
+        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        serverSslCtx = wrapContext(SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
+                .sslProvider(sslServerProvider())
+                .sslContextProvider(serverSslContextProvider())
+                .ciphers(ciphers())
+                .build());
+        SSLEngine clientEngine = null;
+        SSLEngine serverEngine = null;
+        String[] clientProtocols;
+        String[] serverProtocols;
+        try {
+            clientEngine = wrapEngine(clientSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT));
+            serverEngine = wrapEngine(serverSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT));
+            clientProtocols = clientEngine.getEnabledProtocols();
+            serverProtocols = serverEngine.getEnabledProtocols();
+        } finally {
+            cleanupClientSslEngine(clientEngine);
+            cleanupServerSslEngine(serverEngine);
+            ssc.delete();
+        }
+
+        assertEquals(SslProvider.isTlsv13EnabledByDefault(sslClientProvider()),
+                arrayContains(clientProtocols, PROTOCOL_TLS_V1_3));
+        assertEquals(SslProvider.isTlsv13EnabledByDefault(sslServerProvider()),
+                arrayContains(serverProtocols, PROTOCOL_TLS_V1_3));
+    }
+
+    private static boolean arrayContains(String[] array, String value) {
+        for (String v: array) {
+            if (value.equals(v)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     protected SSLEngine wrapEngine(SSLEngine engine) {
